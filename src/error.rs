@@ -40,3 +40,26 @@ impl fmt::Display for DecodeError {
 }
 
 impl std::error::Error for DecodeError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_variant_formats_without_panicking() {
+        let variants = [
+            DecodeError::MalformedToken,
+            DecodeError::InvalidBase64("header"),
+            DecodeError::InvalidJson("payload"),
+            DecodeError::MissingAlgorithm,
+            DecodeError::DisallowedAlgorithm,
+            DecodeError::InvalidSignature,
+            DecodeError::TokenExpired,
+            DecodeError::TokenNotYetValid,
+            DecodeError::ImplausibleIssuedAt,
+        ];
+        for variant in variants {
+            assert!(!variant.to_string().is_empty());
+        }
+    }
+}

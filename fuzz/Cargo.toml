@@ -9,6 +9,12 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+base64 = "0.23.1"
+hmac = "0.13.0"
+sha2 = "0.11.0"
 
 [dependencies.ferro-forge]
 path = ".."
@@ -16,6 +22,13 @@ path = ".."
 [[bin]]
 name = "decode_and_verify"
 path = "fuzz_targets/decode_and_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signed_claims"
+path = "fuzz_targets/signed_claims.rs"
 test = false
 doc = false
 bench = false
