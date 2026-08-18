@@ -32,3 +32,10 @@ path = "fuzz_targets/signed_claims.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "signed_header"
+path = "fuzz_targets/signed_header.rs"
+test = false
+doc = false
+bench = false

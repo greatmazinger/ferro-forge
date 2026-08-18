@@ -30,12 +30,12 @@ let claims = ferro_forge::decode_and_verify(token, key)?;
 - **Standard claim validation:** `exp` (rejects if expired), `nbf` (rejects
   if not yet valid), and a basic `iat` sanity check (rejects if implausibly
   far in the future, beyond a small clock-skew allowance).
-- **Fuzz-tested entry point**, via two complementary `cargo-fuzz` targets
+- **Fuzz-tested entry point**, via three complementary `cargo-fuzz` targets
   (see [Fuzzing](#fuzzing) below): one feeding `decode_and_verify` arbitrary
-  bytes, one feeding it structurally valid, correctly-signed tokens so the
-  fuzzer can reach claim validation instead of dying at signature
-  verification. Combined: 0 crashes, 0 panics, 0 artifacts, and 75% region
-  coverage of `src/` (100% of `claims.rs`).
+  bytes, and two feeding it structurally valid, correctly-signed tokens so
+  the fuzzer can reach claim validation and algorithm rejection instead of
+  dying at signature verification. Combined: 0 crashes, 0 panics, 0
+  artifacts, 100% line coverage of `src/lib.rs` and `src/claims.rs`.
 
 ## Not yet built
 
@@ -57,9 +57,10 @@ rustup toolchain install nightly
 cargo +nightly install cargo-fuzz
 cargo +nightly fuzz run decode_and_verify -- -max_total_time=60
 cargo +nightly fuzz run signed_claims -- -max_total_time=60
+cargo +nightly fuzz run signed_header -- -max_total_time=60
 ```
 
-There are two targets, because one alone leaves most of the crate
+There are three targets, because one alone leaves most of the crate
 unreachable:
 
 - **`decode_and_verify`** (`fuzz_targets/decode_and_verify.rs`) feeds raw
@@ -71,40 +72,37 @@ unreachable:
   matter how long it runs.
 - **`signed_claims`** (`fuzz_targets/signed_claims.rs`) lets the fuzzer
   control only the claim values (`sub`, `exp`, `nbf`, `iat`, plus a couple
-  of extra scalars that land in the passthrough map); the harness itself
-  handles base64 encoding and HMAC signing with the known fuzz key, so
-  every generated token has a valid signature by construction and the
-  fuzzer's mutation budget goes toward claim-value edge cases instead of
-  toward guessing a 256-bit MAC.
+  of extra scalars that land in the passthrough map) with `alg` fixed to
+  `"HS256"`; the harness handles base64 encoding and HMAC signing with the
+  known fuzz key, so every generated token has a valid signature by
+  construction and the fuzzer's mutation budget goes toward claim-value
+  edge cases instead of toward guessing a 256-bit MAC.
+- **`signed_header`** (`fuzz_targets/signed_header.rs`) is the same idea,
+  but the fuzzer also controls `alg` instead of it being fixed. The
+  signature is still computed correctly for whatever header comes out, so
+  a token with `alg: "RS256"` (say) is otherwise well-formed and correctly
+  signed — the only way it can be rejected is the allow-list check itself,
+  which `signed_claims`'s fixed header can't reach and
+  `decode_and_verify`'s raw bytes essentially never hit by chance (needs
+  valid base64 *and* valid JSON *and* a mismatched `alg` string at once).
 
-A 5-minute run of each: 4.7M+ execs on `signed_claims` (proportionally
-similar on `decode_and_verify`), 0 crashes, 0 panics, 0 artifacts.
-Coverage (`cargo +nightly fuzz coverage <target>`, reported via
-`llvm-cov`) confirms the split does what it's supposed to:
+Exploratory runs so far: `signed_claims` for 5 minutes (4.7M execs),
+`signed_header` for 60s (1.5M execs), `decode_and_verify` for 60s (~12.7M
+execs, per an earlier session) — 0 crashes, 0 panics, 0 artifacts across
+all three. Coverage (`cargo +nightly fuzz coverage <target>`, reported via
+`llvm-cov`) confirms each target earns its keep:
 
-| | `decode_and_verify` alone | `signed_claims` alone | combined |
-|---|---|---|---|
-| `src/lib.rs` | 35.5% regions | 85.5% regions | 90.8% regions |
-| `src/claims.rs` | 0.0% | 100.0% | 100.0% |
-| `src/error.rs` | 0.0% | 0.0% | 0.0% |
-| **total** | 22.5% | 71.7% | **75.0% regions** |
+| | `decode_and_verify` | `signed_claims` | `signed_header` | **combined** |
+|---|---|---|---|---|
+| `src/lib.rs` (lines) | 35.3% | 91.2% | 97.1% | **100.0%** |
+| `src/claims.rs` (lines) | 0.0% | 100.0% | 100.0% | **100.0%** |
+| `src/error.rs` (lines) | 0.0% | 0.0% | 0.0% | **0.0%** |
 
-Two known, understood gaps, not blind spots:
-
-- `src/error.rs` is 0% covered by either fuzz target because its only code
-  is the `Display` impl, which nothing in the fuzz harnesses or (until
-  recently) the test suite ever called — `assert_eq!` in the unit tests
-  exercises `Debug`/`PartialEq`, not `Display`. Covered now by a small
-  unit test (`error::tests::every_variant_formats_without_panicking`)
-  rather than by fuzzing, since there's no interesting *input* space to
-  fuzz here.
-- One branch in `src/lib.rs` — rejecting an `alg` that's present but
-  off-allow-list and not `"none"` (e.g. `"RS256"`) — isn't hit by either
-  target: `signed_claims`'s header is hardcoded to `"HS256"`, and
-  `decode_and_verify`'s raw-byte mutation essentially never produces valid
-  base64 *and* valid JSON *and* a mismatched `alg` string at once. A third
-  harness variant that fuzzes the `alg` string while still signing
-  correctly would close this deterministically.
+One known, understood gap, not a blind spot: `src/error.rs` is 0% covered
+by any fuzz target because its only code is the `Display` impl, which
+nothing in the fuzz harnesses ever calls — there's no interesting *input*
+space there to fuzz. It's covered by a unit test instead
+(`error::tests::every_variant_formats_without_panicking`).
 
 ## Testing
 
