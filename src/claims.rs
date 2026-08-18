@@ -6,7 +6,7 @@ use std::collections::HashMap;
 /// Clock-skew allowance for the `iat` sanity check, not a general feature.
 const MAX_FUTURE_SKEW_SECS: i64 = 300;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 pub struct Claims {
     pub sub: Option<String>,
     pub exp: Option<i64>,
