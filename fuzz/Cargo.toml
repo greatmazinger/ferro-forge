@@ -1,0 +1,21 @@
+[package]
+name = "ferro-forge-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.ferro-forge]
+path = ".."
+
+[[bin]]
+name = "decode_and_verify"
+path = "fuzz_targets/decode_and_verify.rs"
+test = false
+doc = false
+bench = false
