@@ -30,12 +30,15 @@ let claims = ferro_forge::decode_and_verify(token, key)?;
 - **Standard claim validation:** `exp` (rejects if expired), `nbf` (rejects
   if not yet valid), and a basic `iat` sanity check (rejects if implausibly
   far in the future, beyond a small clock-skew allowance).
-- **Fuzz-tested entry point**, via three complementary `cargo-fuzz` targets
-  (see [Fuzzing](#fuzzing) below): one feeding `decode_and_verify` arbitrary
-  bytes, and two feeding it structurally valid, correctly-signed tokens so
-  the fuzzer can reach claim validation and algorithm rejection instead of
-  dying at signature verification. Combined: 0 crashes, 0 panics, 0
-  artifacts, 100% line coverage of `src/lib.rs` and `src/claims.rs`.
+- **Fuzz-tested entry point**, via four complementary `cargo-fuzz` targets
+  (see [Fuzzing](#fuzzing) below): three feeding `decode_and_verify` raw
+  bytes or structurally valid, correctly-signed tokens so the fuzzer can
+  reach claim validation and algorithm rejection instead of dying at
+  signature verification, plus a differential target comparing behavior
+  against the `jsonwebtoken` crate. 100% line coverage of `src/lib.rs`
+  and `src/claims.rs`; one confirmed, documented boundary divergence
+  from `jsonwebtoken` at `exp == now` (not a bug in either — see
+  [Fuzzing](#fuzzing)), zero unexplained crashes.
 
 ## Not yet built
 
@@ -58,9 +61,10 @@ cargo +nightly install cargo-fuzz
 cargo +nightly fuzz run decode_and_verify -- -max_total_time=60
 cargo +nightly fuzz run signed_claims -- -max_total_time=60
 cargo +nightly fuzz run signed_header -- -max_total_time=60
+cargo +nightly fuzz run differential -- -max_total_time=60
 ```
 
-There are three targets, because one alone leaves most of the crate
+There are four targets, because one alone leaves most of the crate
 unreachable:
 
 - **`decode_and_verify`** (`fuzz_targets/decode_and_verify.rs`) feeds raw
@@ -85,12 +89,51 @@ unreachable:
   which `signed_claims`'s fixed header can't reach and
   `decode_and_verify`'s raw bytes essentially never hit by chance (needs
   valid base64 *and* valid JSON *and* a mismatched `alg` string at once).
+- **`differential`** (`fuzz_targets/differential.rs`) generates the same
+  correctly-signed token as `signed_claims`, but instead of asserting
+  against ferro-forge's own expectations, it decodes the token with both
+  `ferro_forge::decode_and_verify` *and* `jsonwebtoken` (11.x, `rust_crypto`
+  backend, configured with `leeway = 0`, `validate_nbf = true`,
+  `validate_aud = false`, empty `required_spec_claims` to match
+  ferro-forge's exact scope) and panics on any accept/reject
+  disagreement. `exp`/`nbf` are encoded as a small signed offset from
+  "now" rather than an absolute timestamp — an absolute-epoch seed goes
+  stale the moment it's in the past, and a free-range offset would need
+  to land on today's exact epoch second to probe the boundary this
+  target actually cares about.
+
+Two things this target found, both documented directly in the harness:
+  - **A real, confirmed divergence at `exp == now` exactly.**
+    ferro-forge's check (`src/claims.rs`) is `now >= exp`, which rejects
+    on equality; jsonwebtoken's (with leeway 0) is `exp < now`, which
+    accepts on equality. Neither is wrong — "does a token expire *at*
+    its `exp` instant or only *after* it" is genuinely ambiguous — but
+    two independent HS256 validators land on opposite answers at that
+    exact second. Minimized to a 3-byte reproducer
+    (`fuzz/corpus/differential/regression-exp-equals-now-boundary`,
+    kept as a permanent regression seed) and carved out of the
+    assertion (widened to `|offset| <= 1`, since the harness, ferro-forge,
+    and jsonwebtoken each read the wall clock independently and a tick
+    between any two of those reads can shift which side of the boundary
+    an offset of ±1 lands on) so the fuzzer keeps hunting instead of
+    re-finding this one every run.
+  - **A panic in the harness itself**, not in either library:
+    `i16::MIN.abs()` overflows, because `i16` has no positive
+    representation of 32768. Classic `abs()`-on-`MIN` footgun, caught by
+    the fuzzer at `exp_offset: -32768`. Fixed by casting to `i32` before
+    taking the absolute value; reproducer kept at
+    `fuzz/corpus/differential/regression-i16-min-abs-overflow`.
 
 Exploratory runs so far: `signed_claims` for 5 minutes (4.7M execs),
 `signed_header` for 60s (1.5M execs), `decode_and_verify` for 60s (~12.7M
-execs, per an earlier session) — 0 crashes, 0 panics, 0 artifacts across
-all three. Coverage (`cargo +nightly fuzz coverage <target>`, reported via
-`llvm-cov`) confirms each target earns its keep:
+execs, per an earlier session), `differential` for a combined ~5 minutes
+across a few sessions (~2M+ execs, two findings noted above, both fixed
+or carved out, 0 unexplained crashes since). Coverage
+(`cargo +nightly fuzz coverage <target>`, reported via `llvm-cov`)
+confirms the three claim/structure-focused targets earn their keep —
+`differential` calls the exact same `decode_and_verify` entry point as
+`signed_claims`, so it doesn't add new lines covered within ferro-forge
+itself; its value is the cross-library comparison, not new coverage:
 
 | | `decode_and_verify` | `signed_claims` | `signed_header` | **combined** |
 |---|---|---|---|---|

@@ -1,4 +1,7 @@
 target
-corpus
+/corpus/*
+!/corpus/differential
+/corpus/differential/*
+!/corpus/differential/regression-*
 artifacts
 coverage
