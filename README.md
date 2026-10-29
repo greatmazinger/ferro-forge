@@ -1,7 +1,9 @@
-# ferro-forge
+# FerroForge
 
-A small, honestly-scoped JWT decoder and validator, written to have real
-fuzzable surface: parsing genuinely untrusted, attacker-shaped input.
+ferro_forge is a minimal HS256 JWT decoder and validator built as a fuzzing
+target for untrusted input. Rather than acting as a full identity library or an
+RFC 8693 token-exchange implementation, it focuses purely on decoding and
+verifying HS256 tokens safely.
 
 This is a **validator**, not a full identity library, and not an
 [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693) token-exchange
@@ -12,33 +14,34 @@ tries to do that one thing carefully.
 let claims = ferro_forge::decode_and_verify(token, key)?;
 ```
 
-## Implemented and verified
+## What's Implemented
 
-- **Segment parsing.** Splits a token on `.` into header/payload/signature,
-  rejects any token that isn't exactly three segments, and base64url-decodes
-  each segment — rejecting invalid base64 as a normal error, not a panic.
-- **JSON parsing** of the decoded header and payload (via `serde_json`).
+
+- **Segment parsing.** Splits tokens on . into header, payload, and signature.
+  Rejects anything without exactly three segments and base64url-decodes each
+  part, returning standard errors on malformed input without panicking.
+- **Header & payload deserialization** Parses decoded JSON segments via serde_json.
 - **Algorithm allow-listing.** Reads `alg` from the header and rejects
-  anything not on a small allow-list (currently just `HS256`) — including
-  `"alg": "none"` — *before* the payload is decoded, before the signature is
-  checked, and before any claim is parsed. This is deliberate: rejecting
-  `none` and off-allow-list algorithms is the best-known JWT vulnerability
-  class, and the check should read as load-bearing, not incidental.
-- **HS256 signature verification**, via the RustCrypto `hmac` + `sha2`
-  crates (constant-time comparison through `Mac::verify_slice` — no
-  hand-rolled HMAC).
+- **Strict algorithm allow-listing** Checks the header alg against an explicit
+  allow-list (currently HS256 only) and rejects "alg": "none" or unexpected
+  algorithms before decoding the payload, verifying the signature, or parsing
+  claims.
+- **HS256 signature verification** Uses the RustCrypto hmac and sha2 crates,
+  relying on Mac::verify_slice for constant-time comparison rather than custom
+  crypto.
 - **Standard claim validation:** `exp` (rejects if expired), `nbf` (rejects
   if not yet valid), and a basic `iat` sanity check (rejects if implausibly
   far in the future, beyond a small clock-skew allowance).
-- **Fuzz-tested entry point**, via four complementary `cargo-fuzz` targets
-  (see [Fuzzing](#fuzzing) below): three feeding `decode_and_verify` raw
-  bytes or structurally valid, correctly-signed tokens so the fuzzer can
-  reach claim validation and algorithm rejection instead of dying at
-  signature verification, plus a differential target comparing behavior
-  against the `jsonwebtoken` crate. 100% line coverage of `src/lib.rs`
-  and `src/claims.rs`; one confirmed, documented boundary divergence
-  from `jsonwebtoken` at `exp == now` (not a bug in either — see
-  [Fuzzing](#fuzzing)), zero unexplained crashes.
+- **Standard claim validation** Enforces exp (expiration), nbf (not-before),
+  and iat (rejecting tokens issued implausibly far in the future beyond a small
+  clock-skew window).
+- **Fuzzing & differential testing** Tested via four cargo-fuzz targets (see
+  Fuzzing below). Three targets feed decode_and_verify raw bytes and
+  structurally valid, pre-signed tokens so the fuzzer reaches deep claim and
+  algorithm paths rather than bouncing off HMAC verification. A fourth runs
+  differential fuzzing against the jsonwebtoken crate. Currently at 100% line
+  coverage across src/lib.rs and src/claims.rs with zero crashes and one
+  documented boundary difference against jsonwebtoken at exp == now.
 
 ## Not yet built
 
@@ -51,7 +54,6 @@ let claims = ferro_forge::decode_and_verify(token, key)?;
 - Replay protection / `jti` tracking
 
 ## Fuzzing
-
 Requires a nightly toolchain (for libFuzzer coverage instrumentation) and
 `cargo-fuzz`:
 
@@ -67,73 +69,66 @@ cargo +nightly fuzz run differential -- -max_total_time=60
 There are four targets, because one alone leaves most of the crate
 unreachable:
 
-- **`decode_and_verify`** (`fuzz_targets/decode_and_verify.rs`) feeds raw
-  bytes straight into `decode_and_verify`. This is the right tool for the
-  segment-splitting, base64, header-JSON, and algorithm-allow-list code —
-  but it can't get past HMAC-SHA256 signature verification by chance, so
-  everything past that point (`Claims` deserialization, `exp`/`nbf`/`iat`
-  validation in `src/claims.rs`) is structurally unreachable to it, no
-  matter how long it runs.
-- **`signed_claims`** (`fuzz_targets/signed_claims.rs`) lets the fuzzer
-  control only the claim values (`sub`, `exp`, `nbf`, `iat`, plus a couple
-  of extra scalars that land in the passthrough map) with `alg` fixed to
-  `"HS256"`; the harness handles base64 encoding and HMAC signing with the
-  known fuzz key, so every generated token has a valid signature by
-  construction and the fuzzer's mutation budget goes toward claim-value
-  edge cases instead of toward guessing a 256-bit MAC.
-- **`signed_header`** (`fuzz_targets/signed_header.rs`) is the same idea,
-  but the fuzzer also controls `alg` instead of it being fixed. The
-  signature is still computed correctly for whatever header comes out, so
-  a token with `alg: "RS256"` (say) is otherwise well-formed and correctly
-  signed — the only way it can be rejected is the allow-list check itself,
-  which `signed_claims`'s fixed header can't reach and
-  `decode_and_verify`'s raw bytes essentially never hit by chance (needs
-  valid base64 *and* valid JSON *and* a mismatched `alg` string at once).
-- **`differential`** (`fuzz_targets/differential.rs`) generates the same
-  correctly-signed token as `signed_claims`, but instead of asserting
-  against ferro-forge's own expectations, it decodes the token with both
-  `ferro_forge::decode_and_verify` *and* `jsonwebtoken` (11.x, `rust_crypto`
-  backend, configured with `leeway = 0`, `validate_nbf = true`,
-  `validate_aud = false`, empty `required_spec_claims` to match
-  ferro-forge's exact scope) and panics on any accept/reject
-  disagreement. `exp`/`nbf` are encoded as a small signed offset from
-  "now" rather than an absolute timestamp — an absolute-epoch seed goes
-  stale the moment it's in the past, and a free-range offset would need
-  to land on today's exact epoch second to probe the boundary this
-  target actually cares about.
+We use four separate targets because a single raw-byte fuzzer cannot get past the HMAC check to reach the deeper validation logic:
 
-Two things this target found, both documented directly in the harness:
-  - **A real, confirmed divergence at `exp == now` exactly.**
-    ferro-forge's check (`src/claims.rs`) is `now >= exp`, which rejects
-    on equality; jsonwebtoken's (with leeway 0) is `exp < now`, which
-    accepts on equality. Neither is wrong — "does a token expire *at*
-    its `exp` instant or only *after* it" is genuinely ambiguous — but
-    two independent HS256 validators land on opposite answers at that
-    exact second. Minimized to a 3-byte reproducer
-    (`fuzz/corpus/differential/regression-exp-equals-now-boundary`,
-    kept as a permanent regression seed) and carved out of the
-    assertion (widened to `|offset| <= 1`, since the harness, ferro-forge,
-    and jsonwebtoken each read the wall clock independently and a tick
-    between any two of those reads can shift which side of the boundary
-    an offset of ±1 lands on) so the fuzzer keeps hunting instead of
-    re-finding this one every run.
-  - **A panic in the harness itself**, not in either library:
-    `i16::MIN.abs()` overflows, because `i16` has no positive
-    representation of 32768. Classic `abs()`-on-`MIN` footgun, caught by
-    the fuzzer at `exp_offset: -32768`. Fixed by casting to `i32` before
-    taking the absolute value; reproducer kept at
-    `fuzz/corpus/differential/regression-i16-min-abs-overflow`.
+- **`decode_and_verify`** (`fuzz_targets/decode_and_verify.rs`) Feeds raw bytes
+directly into decode_and_verify. Exercises segment splitting, base64
+decoding, header JSON parsing, and the algorithm allow-list. Because random
+inputs won't produce a valid 256-bit HMAC signature, everything after
+signature verification (Claims deserialization and temporal checks in
+src/claims.rs) is unreachable here.
 
-Exploratory runs so far: `signed_claims` for 5 minutes (4.7M execs),
-`signed_header` for 60s (1.5M execs), `decode_and_verify` for 60s (~12.7M
-execs, per an earlier session), `differential` for a combined ~5 minutes
-across a few sessions (~2M+ execs, two findings noted above, both fixed
-or carved out, 0 unexplained crashes since). Coverage
-(`cargo +nightly fuzz coverage <target>`, reported via `llvm-cov`)
-confirms the three claim/structure-focused targets earn their keep —
-`differential` calls the exact same `decode_and_verify` entry point as
-`signed_claims`, so it doesn't add new lines covered within ferro-forge
-itself; its value is the cross-library comparison, not new coverage:
+- **`signed_header`** (`fuzz_targets/signed_header.rs`) Similar to
+  signed_claims, except the fuzzer also controls the header's alg field before
+  the harness signs the token. This produces well-formed, validly signed tokens
+  with arbitrary alg strings (like "RS256"), specifically targeting the
+  allow-list check—a path signed_claims skips and decode_and_verify rarely hits
+  with raw bytes.
+
+- **`signed_claims`** (`fuzz_targets/signed_claims.rs`) Fixes alg to "HS256"
+  and lets the fuzzer mutate only the claim values (sub, exp, nbf, iat, plus a
+  few extra scalars for the passthrough map). The harness base64-encodes and
+  signs the payload with the fuzz key so every input has a valid MAC, focusing
+  mutations on claim deserialization and boundary checks.
+
+- **`differential`** (`fuzz_targets/differential.rs`) Generates valid signed
+  tokens like signed_claims, decodes them with both
+  ferro_forge::decode_and_verify and the jsonwebtoken crate (v11.x, rust_crypto
+  backend, leeway = 0, validate_nbf = true, validate_aud = false, empty
+  required_spec_claims), and panics if the two libraries disagree. exp and nbf
+  are generated as small signed offsets from the current wall clock rather than
+  absolute timestamps so the seed corpus doesn't go stale over time.
+
+
+### Differential Fuzzing Findings
+
+Both findings below are documented in the harness with regression seeds committed to the corpus:
+
+- **Boundary difference at `exp == now`:** `ferro_forge` checks `now >= exp`
+  (rejecting on equality), whereas `jsonwebtoken` with zero leeway checks `exp
+  < now` (accepting on equality). RFC 7519 §4.1.4 specifies that the current
+  time MUST be before the expiration time (making `now >= exp` the strict
+  reading), though both conventions exist in the wild. We saved the 3-byte
+  reproducer (`fuzz/corpus/differential/regression-exp-equals-now-boundary`)
+  and excluded `|offset| <= 1` from the differential assertion so wall-clock
+  ticks between the harness, `ferro_forge`, and `jsonwebtoken` don't cause
+  false failures.
+- **Harness integer overflow on `i16::MIN.abs()`:** Calling `.abs()` on
+  `exp_offset = -32768` (`i16::MIN`) panicked in the harness itself. Fixed by
+  casting to `i32` before taking the absolute value (reproducer at
+  `fuzz/corpus/differential/regression-i16-min-abs-overflow`).
+
+### Coverage & Run Summary
+
+Exploratory runs so far:
+- `decode_and_verify`: 60s (~12.7M execs)
+- `signed_claims`: 5m (4.7M execs)
+- `signed_header`: 60s (1.5M execs)
+- `differential`: ~5m combined (~2M+ execs, 0 crashes after the two fixes above)
+
+Line coverage via `cargo +nightly fuzz coverage <target>` (`llvm-cov`) across
+the first three targets (`differential` is omitted from the table since it hits
+the exact same `ferro_forge` code paths as `signed_claims`):
 
 | | `decode_and_verify` | `signed_claims` | `signed_header` | **combined** |
 |---|---|---|---|---|
@@ -141,20 +136,16 @@ itself; its value is the cross-library comparison, not new coverage:
 | `src/claims.rs` (lines) | 0.0% | 100.0% | 100.0% | **100.0%** |
 | `src/error.rs` (lines) | 0.0% | 0.0% | 0.0% | **0.0%** |
 
-One known, understood gap, not a blind spot: `src/error.rs` is 0% covered
-by any fuzz target because its only code is the `Display` impl, which
-nothing in the fuzz harnesses ever calls — there's no interesting *input*
-space there to fuzz. It's covered by a unit test instead
-(`error::tests::every_variant_formats_without_panicking`).
+`src/error.rs` shows 0% fuzz coverage because it only contains the `Display`
+implementation, which the fuzz harnesses never invoke. Error formatting is
+verified by unit tests instead (`error::tests::every_variant_formats_without_panicking`).
 
 ## Testing
 
 ```
 cargo test
 ```
-
-Unit tests specifically cover the deliberate-rejection cases — `alg: none`,
-an algorithm off the allow-list, a missing `alg`, malformed base64, a wrong
-segment count, malformed JSON, an expired token, a not-yet-valid token, an
-implausible `iat`, and a bad signature — plus a happy-path round trip and
-a check that every `DecodeError` variant's `Display` impl formats.
+Unit tests cover:
+- **Header & format rejections:** wrong segment count, malformed base64 or JSON, missing `alg`, `alg: none`, and unsupported algorithms
+- **Crypto & temporal rejections:** invalid HMAC signatures, expired `exp`, not-yet-valid `nbf`, and implausible future `iat` claims
+- **Baseline checks:** happy-path round trip and `Display` formatting for every `DecodeError` variant
