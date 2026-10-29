@@ -1,14 +1,9 @@
 # FerroForge
 
-ferro_forge is a minimal HS256 JWT decoder and validator built as a fuzzing
+`ferro_forge` is a minimal HS256 JWT decoder and validator built as a fuzzing
 target for untrusted input. Rather than acting as a full identity library or an
 RFC 8693 token-exchange implementation, it focuses purely on decoding and
 verifying HS256 tokens safely.
-
-This is a **validator**, not a full identity library, and not an
-[RFC 8693](https://www.rfc-editor.org/rfc/rfc8693) token-exchange
-implementation. It does one thing — decode and verify HS256 JWTs — and
-tries to do that one thing carefully.
 
 ```rust
 let claims = ferro_forge::decode_and_verify(token, key)?;
